@@ -87,8 +87,19 @@ namespace ElevenLabsWPF
             var handler = new HttpClientHandler();
             if (!string.IsNullOrWhiteSpace(_proxy))
             {
-                handler.Proxy = BuildProxy(_proxy!);
-                handler.UseProxy = true;
+                var (proxyUri, username, password) = ParseProxy(_proxy!);
+                if (proxyUri != null)
+                {
+                    var proxy = new WebProxy(proxyUri);
+                    if (!string.IsNullOrWhiteSpace(username))
+                    {
+                        proxy.Credentials = new NetworkCredential(username, password);
+                    }
+
+                    handler.Proxy = proxy;
+                    handler.PreAuthenticate = true;
+                    handler.UseDefaultCredentials = false;
+                }
             }
 
             var client = new HttpClient(handler, disposeHandler: true);
@@ -96,23 +107,127 @@ namespace ElevenLabsWPF
             return client;
         }
 
-        private static IWebProxy? BuildProxy(string proxyText)
+        private static (Uri? Uri, string? Username, string? Password) ParseProxy(string? proxyText)
         {
             if (string.IsNullOrWhiteSpace(proxyText))
             {
-                return null;
+                return (null, null, null);
             }
 
-            try
+            var trimmed = proxyText.Trim();
+            if (trimmed.Contains("://", StringComparison.OrdinalIgnoreCase))
             {
-                var uriText = proxyText.Contains("http", StringComparison.OrdinalIgnoreCase) ? proxyText : $"http://{proxyText}";
-                var uri = new Uri(uriText);
-                return new WebProxy(uri);
+                return ParseProxyUri(trimmed);
             }
-            catch (Exception ex)
+
+            return ParseColonSeparatedProxy(trimmed);
+        }
+
+        private static (Uri? Uri, string? Username, string? Password) ParseProxyUri(string proxyText)
+        {
+            if (!Uri.TryCreate(proxyText, UriKind.Absolute, out var uri) || string.IsNullOrWhiteSpace(uri.Host))
             {
-                throw new InvalidOperationException("Invalid proxy format", ex);
+                throw new InvalidOperationException("Invalid proxy format. Use IP:PORT or http://USERNAME:PASSWORD@IP:PORT.");
             }
+
+            ValidateProxyHost(uri.Host);
+            ValidateProxyPort(uri.Port);
+
+            string? username = null;
+            string? password = null;
+
+            if (!string.IsNullOrEmpty(uri.UserInfo))
+            {
+                var parts = uri.UserInfo.Split(':');
+                if (parts.Length != 2)
+                {
+                    throw new InvalidOperationException("Proxy username and password must both be provided.");
+                }
+
+                username = Uri.UnescapeDataString(parts[0]);
+                password = Uri.UnescapeDataString(parts[1]);
+
+                if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+                {
+                    throw new InvalidOperationException("Proxy username and password must both be provided.");
+                }
+            }
+
+            return (uri, username, password);
+        }
+
+        private static (Uri? Uri, string? Username, string? Password) ParseColonSeparatedProxy(string proxyText)
+        {
+            var segments = proxyText.Split(':', StringSplitOptions.RemoveEmptyEntries);
+            if (segments.Length != 2 && segments.Length != 4)
+            {
+                throw new InvalidOperationException("Invalid proxy format. Use IP:PORT or IP:PORT:USERNAME:PASSWORD.");
+            }
+
+            var host = segments[0].Trim();
+            var portText = segments[1].Trim();
+            ValidateProxyHost(host);
+            var port = ParseProxyPort(portText);
+
+            string? username = null;
+            string? password = null;
+            if (segments.Length == 4)
+            {
+                username = segments[2].Trim();
+                password = segments[3].Trim();
+                if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+                {
+                    throw new InvalidOperationException("Proxy username and password must both be provided.");
+                }
+            }
+
+            var builder = new UriBuilder("http", host, port);
+            if (!string.IsNullOrWhiteSpace(username))
+            {
+                builder.UserName = Uri.EscapeDataString(username);
+                builder.Password = Uri.EscapeDataString(password!);
+            }
+
+            var uri = builder.Uri;
+            if (string.IsNullOrWhiteSpace(username))
+            {
+                return (uri, null, null);
+            }
+
+            return (uri, username, password);
+        }
+
+        private static void ValidateProxyHost(string host)
+        {
+            if (string.IsNullOrWhiteSpace(host))
+            {
+                throw new InvalidOperationException("Proxy host is required.");
+            }
+
+            var hostType = Uri.CheckHostName(host);
+            if (hostType != UriHostNameType.Dns && hostType != UriHostNameType.IPv4)
+            {
+                throw new InvalidOperationException("Proxy host must be a valid IPv4 address or hostname.");
+            }
+        }
+
+        private static void ValidateProxyPort(int port)
+        {
+            if (port <= 0 || port > 65535)
+            {
+                throw new InvalidOperationException("Proxy port must be a number between 1 and 65535.");
+            }
+        }
+
+        private static int ParseProxyPort(string portText)
+        {
+            if (!int.TryParse(portText, out var port))
+            {
+                throw new InvalidOperationException("Proxy port must be a number between 1 and 65535.");
+            }
+
+            ValidateProxyPort(port);
+            return port;
         }
     }
 
